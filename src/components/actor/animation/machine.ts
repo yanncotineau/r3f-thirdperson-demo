@@ -9,7 +9,6 @@ export type ConditionCtx = {
   headingRad: number
   prevHeadingRad: number
   timeInState: number
-  // (you can add more sensors later)
 }
 
 export type ClipNode = {
@@ -24,8 +23,7 @@ export type TurnBlendNode = {
   fromClip: string            // base clip (Walk)
   toClip: string              // turn clip (WalkLeftTurn)
   duration: (ctx: ConditionCtx) => number
-  // Envelope windows (normalized time 0..1)
-  // wTo = smoothstep(inStart,inEnd,t) * (1 - smoothstep(outStart,outEnd,t))
+  // Envelope windows (normalized 0..1)
   rampIn?:  [start: number, end: number]
   rampOut?: [start: number, end: number]
 }
