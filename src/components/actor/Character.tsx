@@ -10,7 +10,7 @@ import { STATES, makeTransitions, ACTION } from './animation/config'
 const HEIGHT = 1.8
 const RADIUS = 0.35
 const SPEED_WALK = 2.2
-const SPEED_RUN  = 5.0            // ⟵ faster run speed
+const SPEED_RUN  = 5.0
 const MODEL_YAW_OFFSET = 0
 
 type Props = { yawPitchRef: React.MutableRefObject<YawPitch> }
@@ -23,21 +23,32 @@ export const Character = forwardRef<RapierRigidBody, Props>(function Character(_
     else (ref as React.MutableRefObject<RapierRigidBody | null>).current = rbRef.current
   }, [ref])
 
-  // Assets
-  const idleFBX = useFBX('/Idle.fbx')
-  const walkFBX = useFBX('/Walking.fbx')
-  const runFBX  = useFBX('/Running.fbx')
+  // ──────────────────────────────────────────────────────────────
+  // Load ONE base model (mesh + skeleton, with skin)
+  // ──────────────────────────────────────────────────────────────
+  const model = useFBX('/Character.fbx') // your single mesh/skeleton
 
-  // Prep
+  // Prepare visuals
   useEffect(() => {
-    idleFBX.scale.setScalar(0.01)
-    idleFBX.traverse(o => { o.castShadow = o.receiveShadow = true })
-  }, [idleFBX])
+    model.scale.setScalar(0.01)
+    model.traverse((o) => {
+      o.castShadow = true
+      o.receiveShadow = true
+    })
+  }, [model])
 
-  // Mixer
-  const mixer = useMemo(() => new THREE.AnimationMixer(idleFBX), [idleFBX])
+  // Mixer is bound to the single model root
+  const mixer = useMemo(() => new THREE.AnimationMixer(model), [model])
 
-  // Helper
+  // ──────────────────────────────────────────────────────────────
+  // Load animation-only FBXs (WITHOUT SKIN). We ignore their scene,
+  // we only use their AnimationClips and target them to `model`.
+  // ──────────────────────────────────────────────────────────────
+  const idleFBX   = useFBX('/anims/Idle.fbx')
+  const walkFBX   = useFBX('/anims/Walking.fbx')
+  const runFBX    = useFBX('/anims/Running.fbx')
+
+  // Helper to pick a clip by names (first match wins)
   function findClip(src: THREE.Object3D, names: string[]) {
     const list = src.animations || []
     for (const n of names) {
@@ -47,33 +58,37 @@ export const Character = forwardRef<RapierRigidBody, Props>(function Character(_
     return list[0]
   }
 
-  // Actions
+  // Create actions: IMPORTANT — clipAction(clip, model) so it binds to the single skeleton
   const actions: ActionMap = useMemo(() => {
     const map: ActionMap = {}
-    const idle = findClip(idleFBX, ['Idle', 'idle'])
-    const walk = findClip(walkFBX, ['Walking', 'Walk', 'walk'])
-    const run  = findClip(runFBX,  ['Running', 'Run', 'run'])
-    if (idle) map[ACTION.Idle] = mixer.clipAction(idle, idleFBX)
-    if (walk) map[ACTION.Walk] = mixer.clipAction(walk, idleFBX)
-    if (run)  map[ACTION.Run]  = mixer.clipAction(run,  idleFBX)
-    Object.values(map).forEach(a => {
+
+    const idleClip = findClip(idleFBX, ['Idle', 'idle'])
+    const walkClip = findClip(walkFBX, ['Walking', 'Walk', 'walk'])
+    const runClip  = findClip(runFBX,  ['Running', 'Run', 'run'])
+
+    if (idleClip) map[ACTION.Idle] = mixer.clipAction(idleClip, model)
+    if (walkClip) map[ACTION.Walk] = mixer.clipAction(walkClip, model)
+    if (runClip)  map[ACTION.Run]  = mixer.clipAction(runClip,  model)
+
+    Object.values(map).forEach((a) => {
       a.enabled = true
       a.setEffectiveWeight(0)
       a.setLoop(THREE.LoopRepeat, Infinity)
       a.play()
     })
     return map
-  }, [idleFBX, walkFBX, runFBX, mixer])
+  }, [mixer, model, idleFBX, walkFBX, runFBX])
 
   // Controller
   const anim = useMemo(
-    () => new AnimationController({
-      mixer,
-      actions,
-      states: STATES,
-      transitions: makeTransitions(),
-      initial: 'idle',
-    }),
+    () =>
+      new AnimationController({
+        mixer,
+        actions,
+        states: STATES,
+        transitions: makeTransitions(),
+        initial: 'idle',
+      }),
     [mixer, actions]
   )
 
@@ -96,7 +111,10 @@ export const Character = forwardRef<RapierRigidBody, Props>(function Character(_
     }
     window.addEventListener('keydown', down)
     window.addEventListener('keyup', up)
-    return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up) }
+    return () => {
+      window.removeEventListener('keydown', down)
+      window.removeEventListener('keyup', up)
+    }
   }, [])
 
   // scratch
@@ -186,7 +204,8 @@ export const Character = forwardRef<RapierRigidBody, Props>(function Character(_
       angularDamping={8}
     >
       <CapsuleCollider args={[HEIGHT * 0.5 - RADIUS, RADIUS]} />
-      <primitive object={idleFBX} position={[0, -HEIGHT * 0.5, 0]} />
+      {/* Render the single model */}
+      <primitive object={model} position={[0, -HEIGHT * 0.5, 0]} />
     </RigidBody>
   )
 })
