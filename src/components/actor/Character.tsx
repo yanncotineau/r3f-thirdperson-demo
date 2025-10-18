@@ -5,12 +5,12 @@ import { RigidBody, CapsuleCollider, RapierRigidBody } from '@react-three/rapier
 import { useFBX } from '@react-three/drei'
 import type { YawPitch } from '../Scene'
 import { AnimationController, type ActionMap } from './animation/controller'
-import { STATES, makeTransitions, ACTION, DEFAULT_TURN_LEFT_DURATION } from './animation/config'
+import { STATES, makeTransitions, ACTION } from './animation/config'
 
 const HEIGHT = 1.8
 const RADIUS = 0.35
 const SPEED_WALK = 2.2
-const SPEED_RUN  = 4.0
+const SPEED_RUN  = 5.0            // ⟵ faster run speed
 const MODEL_YAW_OFFSET = 0
 
 type Props = { yawPitchRef: React.MutableRefObject<YawPitch> }
@@ -26,7 +26,7 @@ export const Character = forwardRef<RapierRigidBody, Props>(function Character(_
   // Assets
   const idleFBX = useFBX('/Idle.fbx')
   const walkFBX = useFBX('/Walking.fbx')
-  const walkLeftTurnFBX = useFBX('/Walking Left Turn.fbx')
+  const runFBX  = useFBX('/Running.fbx')
 
   // Prep
   useEffect(() => {
@@ -52,13 +52,10 @@ export const Character = forwardRef<RapierRigidBody, Props>(function Character(_
     const map: ActionMap = {}
     const idle = findClip(idleFBX, ['Idle', 'idle'])
     const walk = findClip(walkFBX, ['Walking', 'Walk', 'walk'])
-    const walkLT = findClip(walkLeftTurnFBX, [
-      'Walking Left Turn','Walk_Left_Turn','Walk Left Turn','Turn_Left_Walk'
-    ])
+    const run  = findClip(runFBX,  ['Running', 'Run', 'run'])
     if (idle) map[ACTION.Idle] = mixer.clipAction(idle, idleFBX)
     if (walk) map[ACTION.Walk] = mixer.clipAction(walk, idleFBX)
-    if (walkLT) map[ACTION.WalkLeftTurn] = mixer.clipAction(walkLT, idleFBX)
-
+    if (run)  map[ACTION.Run]  = mixer.clipAction(run,  idleFBX)
     Object.values(map).forEach(a => {
       a.enabled = true
       a.setEffectiveWeight(0)
@@ -66,17 +63,18 @@ export const Character = forwardRef<RapierRigidBody, Props>(function Character(_
       a.play()
     })
     return map
-  }, [idleFBX, walkFBX, walkLeftTurnFBX, mixer])
+  }, [idleFBX, walkFBX, runFBX, mixer])
 
-  // Controller (transitions based on the constant)
-  const anim = useMemo(() =>
-    new AnimationController({
+  // Controller
+  const anim = useMemo(
+    () => new AnimationController({
       mixer,
       actions,
       states: STATES,
       transitions: makeTransitions(),
       initial: 'idle',
-    }), [mixer, actions]
+    }),
+    [mixer, actions]
   )
 
   // Input
@@ -110,11 +108,7 @@ export const Character = forwardRef<RapierRigidBody, Props>(function Character(_
   const qDst    = useMemo(() => new THREE.Quaternion(), [])
   const euler   = useMemo(() => new THREE.Euler(), [])
   const turnLerp = (dt: number) => 1 - Math.pow(0.001, dt)
-
   const prevHeadingRef = useRef(0)
-  const turnStartAngleRef = useRef(0)   // start at 0 (forward)
-  const turnTargetAngleRef = useRef(-Math.PI / 4) // fixed -45° target
-  const prevStateRef = useRef<'idle'|'walk'|'walkLeftTurn'>('idle')
 
   useFrame((state, dt) => {
     const rb = rbRef.current
@@ -141,30 +135,10 @@ export const Character = forwardRef<RapierRigidBody, Props>(function Character(_
 
     const headingRad = Math.atan2(x, z)
 
-    // On entering the turn, lock the target to exactly -45°
-    const curState = anim.state
-    if (prevStateRef.current !== curState && curState === 'walkLeftTurn') {
-      turnStartAngleRef.current = 0
-      turnTargetAngleRef.current = -Math.PI / 4
-    }
-    prevStateRef.current = curState
-
-    // Steering/facing blend strictly over the constant duration
-    const D = DEFAULT_TURN_LEFT_DURATION
-
-    let dirX = x
-    let dirZ = z
-    if (curState === 'walkLeftTurn') {
-      const t = Math.min(1, anim.elapsed / Math.max(0.001, D))
-      const a = (1 - t) * turnStartAngleRef.current + t * turnTargetAngleRef.current
-      dirX = Math.sin(a)
-      dirZ = Math.cos(a)
-    }
-
     // velocity
     desired.set(0, 0, 0)
-      .addScaledVector(forward, dirZ)
-      .addScaledVector(right,   dirX)
+      .addScaledVector(forward, z)
+      .addScaledVector(right,   x)
       .multiplyScalar(speedCap)
 
     const cur = rb.linvel()
@@ -176,7 +150,7 @@ export const Character = forwardRef<RapierRigidBody, Props>(function Character(_
       rb.setAngvel({ x: 0, y: 0, z: 0 }, false)
     }
 
-    // face the blended direction
+    // face the movement direction
     const horizSpeed = Math.hypot(desired.x, desired.z)
     if (horizSpeed > 0.05) {
       const targetYaw = Math.atan2(desired.x, desired.z) + MODEL_YAW_OFFSET
@@ -188,7 +162,7 @@ export const Character = forwardRef<RapierRigidBody, Props>(function Character(_
       rb.setRotation({ x: qCur.x, y: qCur.y, z: qCur.z, w: qCur.w }, true)
     }
 
-    // controller (no duration passed; graph/node use the constant)
+    // animation controller
     anim.update(dt, {
       speed: horizSpeed,
       input: { x, z, run },

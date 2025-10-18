@@ -1,7 +1,6 @@
-export type AnimStateId =
-  | 'idle'
-  | 'walk'
-  | 'walkLeftTurn'
+// Minimal FSM types for Idle / Walk / Run
+
+export type AnimStateId = 'idle' | 'walk' | 'run'
 
 export type ConditionCtx = {
   speed: number
@@ -18,17 +17,7 @@ export type ClipNode = {
   timeScale?: (ctx: ConditionCtx) => number
 }
 
-export type TurnBlendNode = {
-  kind: 'turnBlend'
-  fromClip: string            // base clip (Walk)
-  toClip: string              // turn clip (WalkLeftTurn)
-  duration: (ctx: ConditionCtx) => number
-  // Envelope windows (normalized 0..1)
-  rampIn?:  [start: number, end: number]
-  rampOut?: [start: number, end: number]
-}
-
-export type AnimNode = ClipNode | TurnBlendNode
+export type AnimNode = ClipNode
 
 export type StateDef = {
   id: AnimStateId
