@@ -1,6 +1,6 @@
-// Minimal FSM types for Idle / Walk / Run
+// Minimal FSM types for Idle / Walk / Run + one-shots (RunStop, IdleToSprint)
 
-export type AnimStateId = 'idle' | 'walk' | 'run'
+export type AnimStateId = 'idle' | 'walk' | 'run' | 'runStop' | 'idleToSprint'
 
 export type ConditionCtx = {
   speed: number
@@ -8,12 +8,16 @@ export type ConditionCtx = {
   headingRad: number
   prevHeadingRad: number
   timeInState: number
+  // Seconds since Shift was released (Infinity while held or never pressed)
+  runReleasedAgo: number
 }
 
 export type ClipNode = {
   kind: 'clip'
   clip: string
   loop?: boolean
+  // For one-shots: where to go when done (controller blends proactively)
+  exitTo?: AnimStateId
   timeScale?: (ctx: ConditionCtx) => number
 }
 

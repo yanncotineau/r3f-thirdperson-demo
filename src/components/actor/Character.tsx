@@ -6,6 +6,7 @@ import { useFBX } from '@react-three/drei'
 import type { YawPitch } from '../Scene'
 import { AnimationController, type ActionMap } from './animation/controller'
 import { STATES, makeTransitions, ACTION } from './animation/config'
+import { makeInPlace } from './animation/utils'
 
 const HEIGHT = 1.8
 const RADIUS = 0.35
@@ -15,6 +16,12 @@ const MODEL_YAW_OFFSET = 0
 
 type Props = { yawPitchRef: React.MutableRefObject<YawPitch> }
 
+const clamp01 = (x: number) => Math.max(0, Math.min(1, x))
+const smootherstep01 = (a: number, b: number, x: number) => {
+  const t = clamp01((x - a) / (b - a))
+  return t * t * t * (t * (t * 6 - 15) + 10)
+}
+
 export const Character = forwardRef<RapierRigidBody, Props>(function Character(_props, ref) {
   const rbRef = useRef<RapierRigidBody | null>(null)
   useEffect(() => {
@@ -23,12 +30,8 @@ export const Character = forwardRef<RapierRigidBody, Props>(function Character(_
     else (ref as React.MutableRefObject<RapierRigidBody | null>).current = rbRef.current
   }, [ref])
 
-  // ──────────────────────────────────────────────────────────────
-  // Load ONE base model (mesh + skeleton, with skin)
-  // ──────────────────────────────────────────────────────────────
-  const model = useFBX('/Character.fbx') // your single mesh/skeleton
-
-  // Prepare visuals
+  // Single model (with skin)
+  const model = useFBX('/Character.fbx')
   useEffect(() => {
     model.scale.setScalar(0.01)
     model.traverse((o) => {
@@ -37,18 +40,15 @@ export const Character = forwardRef<RapierRigidBody, Props>(function Character(_
     })
   }, [model])
 
-  // Mixer is bound to the single model root
   const mixer = useMemo(() => new THREE.AnimationMixer(model), [model])
 
-  // ──────────────────────────────────────────────────────────────
-  // Load animation-only FBXs (WITHOUT SKIN). We ignore their scene,
-  // we only use their AnimationClips and target them to `model`.
-  // ──────────────────────────────────────────────────────────────
-  const idleFBX   = useFBX('/anims/Idle.fbx')
-  const walkFBX   = useFBX('/anims/Walking.fbx')
-  const runFBX    = useFBX('/anims/Running.fbx')
+  // Animation-only FBXs (WITHOUT SKIN)
+  const idleFBX         = useFBX('/anims/Idle.fbx')
+  const walkFBX         = useFBX('/anims/Walking.fbx')
+  const runFBX          = useFBX('/anims/Running.fbx')
+  const runStopFBX      = useFBX('/anims/RunToStop.fbx')
+  const idleToSprintFBX = useFBX('/anims/IdleToSprint.fbx')
 
-  // Helper to pick a clip by names (first match wins)
   function findClip(src: THREE.Object3D, names: string[]) {
     const list = src.animations || []
     for (const n of names) {
@@ -58,17 +58,27 @@ export const Character = forwardRef<RapierRigidBody, Props>(function Character(_
     return list[0]
   }
 
-  // Create actions: IMPORTANT — clipAction(clip, model) so it binds to the single skeleton
+  // Actions
   const actions: ActionMap = useMemo(() => {
     const map: ActionMap = {}
 
-    const idleClip = findClip(idleFBX, ['Idle', 'idle'])
-    const walkClip = findClip(walkFBX, ['Walking', 'Walk', 'walk'])
-    const runClip  = findClip(runFBX,  ['Running', 'Run', 'run'])
+    const idleClip         = findClip(idleFBX,         ['Idle', 'idle'])
+    let   walkClip         = findClip(walkFBX,         ['Walking', 'Walk', 'walk'])
+    let   runClip          = findClip(runFBX,          ['Running', 'Run', 'run'])
+    let   runStopClip      = findClip(runStopFBX,      ['Run To Stop', 'RunToStop', 'Run_Stop', 'Run Stop'])
+    let   idleToSprintClip = findClip(idleToSprintFBX, ['Idle To Sprint', 'IdleToSprint', 'Idle_To_Sprint'])
 
-    if (idleClip) map[ACTION.Idle] = mixer.clipAction(idleClip, model)
-    if (walkClip) map[ACTION.Walk] = mixer.clipAction(walkClip, model)
-    if (runClip)  map[ACTION.Run]  = mixer.clipAction(runClip,  model)
+    // In-place conversions for any locomotion/transition that carries root translation
+    if (walkClip)         walkClip         = makeInPlace(walkClip)
+    if (runClip)          runClip          = makeInPlace(runClip)
+    if (runStopClip)      runStopClip      = makeInPlace(runStopClip)
+    if (idleToSprintClip) idleToSprintClip = makeInPlace(idleToSprintClip)
+
+    if (idleClip)         map[ACTION.Idle]         = mixer.clipAction(idleClip,         model)
+    if (walkClip)         map[ACTION.Walk]         = mixer.clipAction(walkClip,         model)
+    if (runClip)          map[ACTION.Run]          = mixer.clipAction(runClip,          model)
+    if (runStopClip)      map[ACTION.RunStop]      = mixer.clipAction(runStopClip,      model)
+    if (idleToSprintClip) map[ACTION.IdleToSprint] = mixer.clipAction(idleToSprintClip, model)
 
     Object.values(map).forEach((a) => {
       a.enabled = true
@@ -77,7 +87,13 @@ export const Character = forwardRef<RapierRigidBody, Props>(function Character(_
       a.play()
     })
     return map
-  }, [mixer, model, idleFBX, walkFBX, runFBX])
+  }, [mixer, model, idleFBX, walkFBX, runFBX, runStopFBX, idleToSprintFBX])
+
+  // Cache the IdleToSprint duration (used for acceleration curve)
+  const idleToSprintDur = useMemo(() => {
+    const a = actions[ACTION.IdleToSprint]
+    return a?.getClip()?.duration ?? 0.9 // sensible default if clip missing
+  }, [actions])
 
   // Controller
   const anim = useMemo(
@@ -92,22 +108,31 @@ export const Character = forwardRef<RapierRigidBody, Props>(function Character(_
     [mixer, actions]
   )
 
-  // Input
+  // Input + run-grace timing
   const keys = useRef({ f: false, b: false, l: false, r: false, run: false })
+  const runReleasedAtSec = useRef<number | null>(null)
+  const nowSec = () => performance.now() * 0.001
+
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
       if (e.code === 'KeyW' || e.code === 'ArrowUp') keys.current.f = true
       if (e.code === 'KeyS' || e.code === 'ArrowDown') keys.current.b = true
       if (e.code === 'KeyA' || e.code === 'ArrowLeft') keys.current.l = true
       if (e.code === 'KeyD' || e.code === 'ArrowRight') keys.current.r = true
-      if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') keys.current.run = true
+      if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
+        keys.current.run = true
+        runReleasedAtSec.current = null
+      }
     }
     const up = (e: KeyboardEvent) => {
       if (e.code === 'KeyW' || e.code === 'ArrowUp') keys.current.f = false
       if (e.code === 'KeyS' || e.code === 'ArrowDown') keys.current.b = false
       if (e.code === 'KeyA' || e.code === 'ArrowLeft') keys.current.l = false
       if (e.code === 'KeyD' || e.code === 'ArrowRight') keys.current.r = false
-      if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') keys.current.run = false
+      if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
+        keys.current.run = false
+        runReleasedAtSec.current = nowSec()
+      }
     }
     window.addEventListener('keydown', down)
     window.addEventListener('keyup', up)
@@ -132,9 +157,6 @@ export const Character = forwardRef<RapierRigidBody, Props>(function Character(_
     const rb = rbRef.current
     if (!rb) return
 
-    const run = keys.current.run
-    const speedCap = run ? SPEED_RUN : SPEED_WALK
-
     // camera-space basis
     state.camera.getWorldDirection(forward)
     forward.y = 0
@@ -153,14 +175,32 @@ export const Character = forwardRef<RapierRigidBody, Props>(function Character(_
 
     const headingRad = Math.atan2(x, z)
 
-    // velocity
-    desired.set(0, 0, 0)
+    // Measure current velocity before applying our new one (for animation state logic)
+    const vNow = rb.linvel()
+    const horizSpeedNow = Math.hypot(vNow.x, vNow.z)
+
+    // Base speed cap (walk or run)
+    const runHeld = keys.current.run
+    let speedCap = runHeld ? SPEED_RUN : SPEED_WALK
+
+    // ✨ Gradual acceleration during IdleToSprint:
+    // scale run speed from 0 → 1 over the clip duration using smootherstep
+    if (anim.state === 'idleToSprint') {
+      const dur = Math.max(0.0001, idleToSprintDur)
+      const t   = Math.min(anim.elapsed, dur)
+      const ramp = smootherstep01(0, dur, t) // smooth 0→1
+      // Ease in gently, clamp to [0, 1], then scale full run speed
+      speedCap = SPEED_RUN * ramp
+    }
+
+    // Desired velocity (camera-relative)
+    desired
+      .set(0, 0, 0)
       .addScaledVector(forward, z)
       .addScaledVector(right,   x)
       .multiplyScalar(speedCap)
 
-    const cur = rb.linvel()
-    rb.setLinvel({ x: desired.x, y: cur.y, z: desired.z }, true)
+    rb.setLinvel({ x: desired.x, y: vNow.y, z: desired.z }, true)
 
     // kill residual spin
     const ang = rb.angvel()
@@ -169,8 +209,7 @@ export const Character = forwardRef<RapierRigidBody, Props>(function Character(_
     }
 
     // face the movement direction
-    const horizSpeed = Math.hypot(desired.x, desired.z)
-    if (horizSpeed > 0.05) {
+    if (Math.hypot(desired.x, desired.z) > 0.05) {
       const targetYaw = Math.atan2(desired.x, desired.z) + MODEL_YAW_OFFSET
       const r = rb.rotation()
       qCur.set(r.x, r.y, r.z, r.w)
@@ -180,12 +219,18 @@ export const Character = forwardRef<RapierRigidBody, Props>(function Character(_
       rb.setRotation({ x: qCur.x, y: qCur.y, z: qCur.z, w: qCur.w }, true)
     }
 
-    // animation controller
+    // Shift-release grace (seconds since released; Infinity if currently held)
+    const releasedAt = runReleasedAtSec.current
+    const runReleasedAgo =
+      (!runHeld && releasedAt != null) ? Math.max(0, (performance.now() * 0.001) - releasedAt) : Number.POSITIVE_INFINITY
+
+    // animation controller (note: we pass the velocity BEFORE applying our new one)
     anim.update(dt, {
-      speed: horizSpeed,
-      input: { x, z, run },
+      speed: horizSpeedNow,
+      input: { x, z, run: runHeld },
       headingRad,
       prevHeadingRad: prevHeadingRef.current,
+      runReleasedAgo,
     })
     prevHeadingRef.current = headingRad
   })
@@ -204,7 +249,6 @@ export const Character = forwardRef<RapierRigidBody, Props>(function Character(_
       angularDamping={8}
     >
       <CapsuleCollider args={[HEIGHT * 0.5 - RADIUS, RADIUS]} />
-      {/* Render the single model */}
       <primitive object={model} position={[0, -HEIGHT * 0.5, 0]} />
     </RigidBody>
   )

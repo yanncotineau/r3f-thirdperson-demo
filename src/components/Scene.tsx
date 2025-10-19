@@ -29,7 +29,7 @@ export function Scene() {
       />
 
       {/* Env + grid */}
-      <Environment preset="city" background blur={0.6} />
+      <Environment preset="forest" background />
       <Grid
         cellSize={1}
         sectionSize={4}
