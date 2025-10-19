@@ -12,10 +12,6 @@ export const STATES: StateDef[] = [
   { id: 'idle',         node: { kind: 'clip', clip: ACTION.Idle } },
   { id: 'walk',         node: { kind: 'clip', clip: ACTION.Walk } },
   { id: 'run',          node: { kind: 'clip', clip: ACTION.Run } },
-
-  // One-shots (non-looping):
-  // - RunStop exits to Idle
-  // - IdleToSprint exits to Run
   { id: 'runStop',      node: { kind: 'clip', clip: ACTION.RunStop,      loop: false, exitTo: 'idle' } },
   { id: 'idleToSprint', node: { kind: 'clip', clip: ACTION.IdleToSprint, loop: false, exitTo: 'run'  } },
 ]
@@ -27,6 +23,8 @@ const SPEED_EPS   = 0.05
 
 // Shift-release grace for RunStop
 export const RUN_GRACE = 0.25 // seconds
+// NEW: Sprint-start grace (W then Shift quickly)
+export const RUN_START_GRACE = 0.25 // seconds
 
 export const makeTransitions = (): Transition[] => [
   // ─────────────────────────────────────────────────────────────────────────────
@@ -55,15 +53,23 @@ export const makeTransitions = (): Transition[] => [
     fade: 0.10,
   },
 
+  // NEW: Walk (just started moving) → IdleToSprint if Shift is pressed soon after movement
+  {
+    from: 'walk',
+    to: 'idleToSprint',
+    when: ({ input, runPressedAgo, moveStartedAgo }) =>
+      input.run &&
+      runPressedAgo < RUN_START_GRACE &&
+      moveStartedAgo < RUN_START_GRACE,
+    fade: 0.10,
+  },
+
   // ─────────────────────────────────────────────────────────────────────────────
   // Core locomotion
   // ─────────────────────────────────────────────────────────────────────────────
-
-  // Fallbacks if one-shot didn’t trigger (e.g., asset missing)
   { from: 'idle', to: 'run',  when: ({ speed, input }) => speed > SPEED_EPS && input.run,  fade: 0.18 },
   { from: 'idle', to: 'walk', when: ({ speed, input }) => speed > SPEED_EPS && !input.run, fade: 0.16 },
 
-  // Walk ↔ Run while moving
   { from: 'walk', to: 'run',  when: ({ speed, input }) => speed > SPEED_EPS && input.run,  fade: 0.16 },
   { from: 'run',  to: 'walk', when: ({ speed, input }) => speed > SPEED_EPS && !input.run, fade: 0.16 },
 
@@ -80,24 +86,19 @@ export const makeTransitions = (): Transition[] => [
   // ─────────────────────────────────────────────────────────────────────────────
   // One-shot interrupts / resumes
   // ─────────────────────────────────────────────────────────────────────────────
-
-  // If you abort the sprint start (release movement), bail to Idle
   {
     from: 'idleToSprint',
     to: 'idle',
     when: ({ input }) => inputMag(input.x, input.z) < STOP_INPUT,
     fade: 0.12,
   },
-  // If you keep moving but release Shift mid-start, go to Walk
   {
     from: 'idleToSprint',
     to: 'walk',
     when: ({ input }) => !input.run && inputMag(input.x, input.z) >= START_INPUT,
     fade: 0.14,
   },
-  // Otherwise the controller waits until the one-shot is DONE, then blends into Run.
 
-  // If you resume input during RunStop, go back to locomotion
   {
     from: 'runStop',
     to: 'run',

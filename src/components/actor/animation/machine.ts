@@ -10,6 +10,10 @@ export type ConditionCtx = {
   timeInState: number
   // Seconds since Shift was released (Infinity while held or never pressed)
   runReleasedAgo: number
+  // NEW: seconds since Shift was pressed (Infinity if not held)
+  runPressedAgo: number
+  // NEW: seconds since movement input started (WASD magnitude crossed threshold)
+  moveStartedAgo: number
 }
 
 export type ClipNode = {

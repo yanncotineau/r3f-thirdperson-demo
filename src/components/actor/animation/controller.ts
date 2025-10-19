@@ -68,6 +68,8 @@ export class AnimationController {
       prevHeadingRad: 0,
       timeInState: 0,
       runReleasedAgo: Number.POSITIVE_INFINITY,
+      runPressedAgo: Number.POSITIVE_INFINITY,   // ⟵ add
+      moveStartedAgo: Number.POSITIVE_INFINITY,  // ⟵ add
     }
     this.applyNode(this.states.get(this.current)!.node, 1, zeroCtx)
   }
