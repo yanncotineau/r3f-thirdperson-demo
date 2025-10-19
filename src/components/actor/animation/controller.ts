@@ -5,18 +5,23 @@ import type {
 
 export type ActionMap = Record<string, THREE.AnimationAction>
 
-// How long we manually blend out of a one-shot into its exit state.
-// This is the full window; the blend starts when remaining time <= this.
-const ONE_SHOT_EXIT_BLEND = 0.28
+// How long we blend AFTER a one-shot fully finishes (super smooth).
+const ONE_SHOT_POST_BLEND = 0.28
 
-// Ease with zero slope at ends (very smooth)
+// Empirical phase alignment to better match end-pose of one-shots.
+const ALIGN_PHASE: Partial<Record<AnimStateId, number>> = {
+  run:  0.18,
+  idle: 0.06,
+}
+
+// Easing helpers (very smooth)
 const clamp01 = (x: number) => Math.max(0, Math.min(1, x))
 const smootherstep01 = (a: number, b: number, x: number) => {
   const t = clamp01((x - a) / (b - a))
   return t * t * t * (t * (t * 6 - 15) + 10)
 }
 
-type ExitBlendState = {
+type PostBlendState = {
   active: boolean
   to: AnimStateId
   dur: number
@@ -31,8 +36,8 @@ export class AnimationController {
   private actions: ActionMap
   private mixer: THREE.AnimationMixer
 
-  // Manual exit blend for non-looping clips
-  private exitBlend: ExitBlendState = { active: false, to: 'idle', dur: 0, t: 0 }
+  // Manual post-finish blend (one-shot -> looping)
+  private postBlend: PostBlendState = { active: false, to: 'idle', dur: 0, t: 0 }
 
   constructor(params: {
     mixer: THREE.AnimationMixer
@@ -62,6 +67,7 @@ export class AnimationController {
       headingRad: 0,
       prevHeadingRad: 0,
       timeInState: 0,
+      runReleasedAgo: Number.POSITIVE_INFINITY,
     }
     this.applyNode(this.states.get(this.current)!.node, 1, zeroCtx)
   }
@@ -72,161 +78,171 @@ export class AnimationController {
   update(dt: number, ctx: Omit<ConditionCtx, 'timeInState'>) {
     const fullCtx: ConditionCtx = { ...ctx, timeInState: this.timeInState }
 
+    // If we’re in a post-finish blend, drive it exclusively (prevents new transitions mid-blend).
+    if (this.postBlend.active) {
+      this.drivePostBlend(dt)
+      return
+    }
+
     const curNode = this.states.get(this.current)!.node
     const isOneShot = curNode.kind === 'clip' && curNode.loop === false
 
-    // 1) Transitions (skip while manual exit blend is active)
-    if (!this.exitBlend.active) {
-      for (const t of this.transitions) {
-        if (t.from !== 'any' && t.from !== this.current) continue
-        // Lock out generic 'any' while a one-shot is playing unless explicitly non-locking
-        if (isOneShot && t.from === 'any' && (t.interruptible ?? true)) continue
-        if (t.minTimeInState && this.timeInState < t.minTimeInState) continue
-        if (!t.when(fullCtx)) continue
-        this.crossFadeTo(t.to, t.fade ?? 0.12, fullCtx)
-        break
-      }
+    // 1) Transitions (skip generic 'any' while a one-shot plays to avoid interrupts)
+    for (const t of this.transitions) {
+      if (t.from !== 'any' && t.from !== this.current) continue
+      if (isOneShot && t.from === 'any' && (t.interruptible ?? true)) continue
+      if (t.minTimeInState && this.timeInState < t.minTimeInState) continue
+      if (!t.when(fullCtx)) continue
+      this.crossFadeTo(t.to, t.fade ?? 0.12, fullCtx)
+      break
     }
 
-    // 2) Drive active node (normal)
-    const node = this.states.get(this.current)!.node
-    this.applyNode(node, undefined, fullCtx)
+    // 2) Drive active node
+    this.applyNode(this.states.get(this.current)!.node, undefined, fullCtx)
 
-    // 3) Mixer tick & local timer
+    // 3) Tick mixer and timer
     this.mixer.update(dt)
     this.timeInState += dt
 
-    // 4) Manual exit blend for one-shots (RunStop → Idle)
-    //    Start when remaining time <= ONE_SHOT_EXIT_BLEND. Then we drive weights/timeScale ourselves.
-    const maybeNode = this.states.get(this.current)?.node
-    if (maybeNode?.kind === 'clip' && maybeNode.loop === false) {
-      const fromAction = this.actions[maybeNode.clip]
-      const dur = fromAction?.getClip()?.duration ?? 0
-      if (dur > 0) {
-        const remaining = dur - this.timeInState
-
-        // Start manual exit blend?
-        if (!this.exitBlend.active && remaining <= ONE_SHOT_EXIT_BLEND) {
-          const toId = maybeNode.exitTo ?? 'idle'
-          this.exitBlend = { active: true, to: toId, dur: ONE_SHOT_EXIT_BLEND, t: 0 }
-
-          // Prepare target action
-          const toNode = this.states.get(toId)!.node
-          const toAction = this.actions[toNode.clip]
-          if (toAction) {
-            toAction.enabled = true
-            toAction.setLoop(THREE.LoopRepeat, Infinity)
-            toAction.setEffectiveTimeScale(1)
-            // Pre-roll idle a touch so it’s already moving under the stop pose
-            // (keeps limbs moving continuously)
-            if (toAction.time === 0) toAction.time = 0.05 * (toAction.getClip()?.duration ?? 0)
-            toAction.play()
-          }
-
-          // Make sure the one-shot clamps at the end and remains valid while we blend
-          if (fromAction) {
-            fromAction.setLoop(THREE.LoopOnce, Infinity)
-            fromAction.clampWhenFinished = true
-          }
+    // 4) Guarantee: if current is a one-shot, PLAY IT FULLY.
+    //    When finished, begin a manual post-finish blend to exitTo.
+    if (isOneShot) {
+      const a = this.actions[curNode.clip]
+      const dur = a?.getClip()?.duration ?? 0
+      if (dur > 0 && this.timeInState >= dur) {
+        // Clamp the one-shot at its last frame so pose is stable under our blend
+        if (a) {
+          a.setLoop(THREE.LoopOnce, Infinity)
+          a.clampWhenFinished = true
+          a.setEffectiveTimeScale(1)
+          a.setEffectiveWeight(1)
+          a.play()
         }
 
-        // Drive manual exit blend
-        if (this.exitBlend.active) {
-          const toId = this.exitBlend.to
-          const toNode = this.states.get(toId)!.node
-          const toAction = this.actions[toNode.clip]
+        // Prepare target (exitTo) for a manual post-finish blend
+        const toId = (curNode.exitTo ?? 'idle') as AnimStateId
+        const toNode = this.states.get(toId)!.node
+        const to = this.actions[toNode.clip]
+        if (to) {
+          // Looping config
+          const looping = toNode.kind === 'clip' ? (toNode.loop ?? true) : true
+          to.setLoop(looping ? THREE.LoopRepeat : THREE.LoopOnce, Infinity)
+          to.clampWhenFinished = !looping
 
-          // Progress
-          this.exitBlend.t = Math.min(this.exitBlend.t + dt, this.exitBlend.dur)
-          const u = smootherstep01(0, this.exitBlend.dur, this.exitBlend.t)
-
-          // Weight shaping: from 1→0, to 0→1 (super smooth)
-          const wFrom = 1 - u
-          const wTo = u
-
-          if (fromAction) {
-            // Slow the one-shot slightly toward the end (keeps limbs from over-swinging)
-            const slow = 1 - 0.6 * u // from 1.0 → 0.4
-            fromAction.setEffectiveTimeScale(slow)
-            fromAction.setEffectiveWeight(wFrom)
-            fromAction.enabled = true
-            fromAction.play()
-          }
-          if (toAction) {
-            toAction.setEffectiveWeight(wTo)
-            toAction.setEffectiveTimeScale(1)
-            toAction.enabled = true
-            toAction.play()
-          }
-
-          // Finish: switch FSM state precisely at the end of the manual blend
-          if (this.exitBlend.t >= this.exitBlend.dur) {
-            // Commit to target state and reset timer
-            this.current = toId
-            this.timeInState = 0
-            this.exitBlend = { active: false, to: 'idle', dur: 0, t: 0 }
-
-            // Ensure target is fully weighted; stop the one-shot
-            if (toAction) {
-              toAction.setEffectiveWeight(1)
-              toAction.setLoop(THREE.LoopRepeat, Infinity)
-              toAction.setEffectiveTimeScale(1)
-              toAction.play()
-            }
-            if (fromAction) {
-              fromAction.setEffectiveWeight(0)
-              fromAction.stop()
-            }
-          }
-
-          // While exit blend is active, we’re done for this frame
-          return
+          // Start target at a pose that matches nicely (align phase),
+          // BUT do not freeze it anymore — give it a small timeScale so there’s zero “pause”.
+          const phase = ALIGN_PHASE[toId] ?? 0
+          const toDur = to.getClip()?.duration ?? 0
+          if (toDur > 0) to.time = phase * toDur
+          to.setEffectiveTimeScale(0.25) // <- small motion from the very start
+          to.setEffectiveWeight(0)       // will ramp up smoothly
+          to.enabled = true
+          to.play()
         }
+
+        // Arm the post-finish blend
+        this.postBlend = { active: true, to: toId, dur: ONE_SHOT_POST_BLEND, t: 0 }
+        return
       }
+    }
+  }
+
+  // Smoothly blend OUT of the finished one-shot into the target loop,
+  // keeping BOTH clips animating (small → full) to avoid any frozen moment.
+  private drivePostBlend(dt: number) {
+    const fromNode = this.states.get(this.current)!.node
+    const from = this.actions[(fromNode as AnimNode).clip]
+    const toNode = this.states.get(this.postBlend.to)!.node
+    const to = this.actions[toNode.clip]
+
+    // Progress the post-blend clock
+    this.postBlend.t = Math.min(this.postBlend.t + dt, this.postBlend.dur)
+    const u = smootherstep01(0, this.postBlend.dur, this.postBlend.t) // 0→1, smooth ends
+
+    // Weights: from 1→0, to 0→1
+    const wFrom = 1 - u
+    const wTo = u
+
+    // TimeScale shaping:
+    //  - One-shot eases down from 1.0 → 0.6 (keeps momentum but avoids overswing)
+    //  - Target loop eases up from 0.25 → 1.0 (never fully frozen)
+    const fromRate = 1.0 - 0.4 * u
+    const toRate   = 0.25 + 0.75 * u
+
+    if (from) {
+      from.setEffectiveWeight(wFrom)
+      from.setLoop(THREE.LoopOnce, Infinity)
+      from.clampWhenFinished = true
+      from.setEffectiveTimeScale(fromRate)
+      from.enabled = true
+      from.play()
+    }
+    if (to) {
+      to.setEffectiveWeight(wTo)
+      to.setEffectiveTimeScale(toRate)
+      to.enabled = true
+      to.play()
+    }
+
+    // Tick mixer and timer (we keep the FSM in the one-shot state until complete)
+    this.mixer.update(dt)
+    this.timeInState += dt
+
+    if (this.postBlend.t >= this.postBlend.dur) {
+      // Finalize: switch to the loop, full weight, full speed
+      if (to) {
+        to.setEffectiveWeight(1)
+        to.setEffectiveTimeScale(1)
+        to.setLoop(THREE.LoopRepeat, Infinity)
+        to.play()
+      }
+      if (from) {
+        from.setEffectiveWeight(0)
+        from.stop()
+      }
+
+      this.current = this.postBlend.to
+      this.timeInState = 0
+      this.postBlend = { active: false, to: 'idle', dur: 0, t: 0 }
     }
   }
 
   private crossFadeTo(next: AnimStateId, fade: number, ctx: ConditionCtx) {
     if (next === this.current) return
 
+    // Cancel any post-blend in progress (explicit state change overrides it)
+    this.postBlend = { active: false, to: 'idle', dur: 0, t: 0 }
+
     const fromNode = this.states.get(this.current)!.node
     const toNode   = this.states.get(next)!.node
-
-    // Clear any manual exit blend when switching
-    this.exitBlend = { active: false, to: 'idle', dur: 0, t: 0 }
 
     // Prepare entry
     this.timeInState = 0
     const entryCtx: ConditionCtx = { ...ctx, timeInState: 0 }
 
-    // Clip → Clip crossfade (regular)
+    // Clip → Clip crossfade
     const from = this.actions[(fromNode as AnimNode).clip]
     const to   = this.actions[(toNode   as AnimNode).clip]
     if (from && to) {
-      // Looping/clamp per node
       const looping = toNode.kind === 'clip' ? (toNode.loop ?? true) : true
       to.setLoop(looping ? THREE.LoopRepeat : THREE.LoopOnce, Infinity)
       to.clampWhenFinished = !looping
 
-      // Playback rate
+      if (fromNode.kind === 'clip' && fromNode.loop === false) {
+        from.setLoop(THREE.LoopOnce, Infinity)
+        from.clampWhenFinished = true
+      }
+
       if (toNode.kind === 'clip' && toNode.timeScale) {
         to.setEffectiveTimeScale(toNode.timeScale(entryCtx))
       } else {
         to.setEffectiveTimeScale(1)
       }
 
-      // Keep source valid while fading (prevents gaps)
-      if (fromNode.kind === 'clip' && fromNode.loop === false) {
-        from.setLoop(THREE.LoopOnce, Infinity)
-        from.clampWhenFinished = true
-      }
-
       to.reset().play()
       to.crossFadeFrom(from, Math.max(0.01, fade), false)
     } else {
-      // Fallback path
-      this.fadeNode(fromNode, 0, fade)
-      this.applyNode(toNode, 1, entryCtx, fade)
+      this.fadeNode(toNode, 1, fade)
     }
 
     this.current = next

@@ -92,7 +92,7 @@ export const Character = forwardRef<RapierRigidBody, Props>(function Character(_
   // Cache the IdleToSprint duration (used for acceleration curve)
   const idleToSprintDur = useMemo(() => {
     const a = actions[ACTION.IdleToSprint]
-    return a?.getClip()?.duration ?? 0.9 // sensible default if clip missing
+    return a?.getClip()?.duration ?? 0.9
   }, [actions])
 
   // Controller
@@ -108,10 +108,20 @@ export const Character = forwardRef<RapierRigidBody, Props>(function Character(_
     [mixer, actions]
   )
 
-  // Input + run-grace timing
+  // ──────────────────────────────────────────────────────────────
+  // Input + timing (grace trackers)
+  // ──────────────────────────────────────────────────────────────
   const keys = useRef({ f: false, b: false, l: false, r: false, run: false })
-  const runReleasedAtSec = useRef<number | null>(null)
+
   const nowSec = () => performance.now() * 0.001
+
+  // Shift press/release times
+  const runPressedAtSec  = useRef<number | null>(null)
+  const runReleasedAtSec = useRef<number | null>(null)
+
+  // Movement start time (when input magnitude crosses from <START_INPUT to ≥START_INPUT)
+  const moveStartedAtSec = useRef<number | null>(null)
+  const lastInputMagRef  = useRef(0)
 
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
@@ -120,6 +130,9 @@ export const Character = forwardRef<RapierRigidBody, Props>(function Character(_
       if (e.code === 'KeyA' || e.code === 'ArrowLeft') keys.current.l = true
       if (e.code === 'KeyD' || e.code === 'ArrowRight') keys.current.r = true
       if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
+        if (!keys.current.run) { // rising edge
+          runPressedAtSec.current = nowSec()
+        }
         keys.current.run = true
         runReleasedAtSec.current = null
       }
@@ -130,8 +143,10 @@ export const Character = forwardRef<RapierRigidBody, Props>(function Character(_
       if (e.code === 'KeyA' || e.code === 'ArrowLeft') keys.current.l = false
       if (e.code === 'KeyD' || e.code === 'ArrowRight') keys.current.r = false
       if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
+        if (keys.current.run) { // falling edge
+          runReleasedAtSec.current = nowSec()
+        }
         keys.current.run = false
-        runReleasedAtSec.current = nowSec()
       }
     }
     window.addEventListener('keydown', down)
@@ -171,11 +186,19 @@ export const Character = forwardRef<RapierRigidBody, Props>(function Character(_
     if (keys.current.l) x -= 1
     if (keys.current.r) x += 1
     const mag = Math.hypot(x, z) || 1
+    const inputMagNow = Math.hypot(x, z)
     x /= mag; z /= mag
+
+    // Detect movement start (rising edge across START_INPUT)
+    const START_INPUT = 0.12
+    if (lastInputMagRef.current < START_INPUT && inputMagNow >= START_INPUT) {
+      moveStartedAtSec.current = nowSec()
+    }
+    lastInputMagRef.current = inputMagNow
 
     const headingRad = Math.atan2(x, z)
 
-    // Measure current velocity before applying our new one (for animation state logic)
+    // Measure current velocity before applying new one (for animation logic)
     const vNow = rb.linvel()
     const horizSpeedNow = Math.hypot(vNow.x, vNow.z)
 
@@ -183,13 +206,11 @@ export const Character = forwardRef<RapierRigidBody, Props>(function Character(_
     const runHeld = keys.current.run
     let speedCap = runHeld ? SPEED_RUN : SPEED_WALK
 
-    // ✨ Gradual acceleration during IdleToSprint:
-    // scale run speed from 0 → 1 over the clip duration using smootherstep
+    // Gradual acceleration during IdleToSprint:
     if (anim.state === 'idleToSprint') {
       const dur = Math.max(0.0001, idleToSprintDur)
       const t   = Math.min(anim.elapsed, dur)
       const ramp = smootherstep01(0, dur, t) // smooth 0→1
-      // Ease in gently, clamp to [0, 1], then scale full run speed
       speedCap = SPEED_RUN * ramp
     }
 
@@ -219,18 +240,24 @@ export const Character = forwardRef<RapierRigidBody, Props>(function Character(_
       rb.setRotation({ x: qCur.x, y: qCur.y, z: qCur.z, w: qCur.w }, true)
     }
 
-    // Shift-release grace (seconds since released; Infinity if currently held)
-    const releasedAt = runReleasedAtSec.current
+    // Ages (seconds) for grace logic
+    const now = nowSec()
     const runReleasedAgo =
-      (!runHeld && releasedAt != null) ? Math.max(0, (performance.now() * 0.001) - releasedAt) : Number.POSITIVE_INFINITY
+      (!runHeld && runReleasedAtSec.current != null) ? Math.max(0, now - runReleasedAtSec.current) : Number.POSITIVE_INFINITY
+    const runPressedAgo =
+      (runHeld && runPressedAtSec.current != null) ? Math.max(0, now - runPressedAtSec.current) : Number.POSITIVE_INFINITY
+    const moveStartedAgo =
+      (moveStartedAtSec.current != null) ? Math.max(0, now - moveStartedAtSec.current) : Number.POSITIVE_INFINITY
 
-    // animation controller (note: we pass the velocity BEFORE applying our new one)
+    // animation controller
     anim.update(dt, {
       speed: horizSpeedNow,
       input: { x, z, run: runHeld },
       headingRad,
       prevHeadingRad: prevHeadingRef.current,
       runReleasedAgo,
+      runPressedAgo,
+      moveStartedAgo,
     })
     prevHeadingRef.current = headingRad
   })

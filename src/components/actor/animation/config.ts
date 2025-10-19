@@ -12,7 +12,10 @@ export const STATES: StateDef[] = [
   { id: 'idle',         node: { kind: 'clip', clip: ACTION.Idle } },
   { id: 'walk',         node: { kind: 'clip', clip: ACTION.Walk } },
   { id: 'run',          node: { kind: 'clip', clip: ACTION.Run } },
-  // One-shots
+
+  // One-shots (non-looping):
+  // - RunStop exits to Idle
+  // - IdleToSprint exits to Run
   { id: 'runStop',      node: { kind: 'clip', clip: ACTION.RunStop,      loop: false, exitTo: 'idle' } },
   { id: 'idleToSprint', node: { kind: 'clip', clip: ACTION.IdleToSprint, loop: false, exitTo: 'run'  } },
 ]
@@ -92,7 +95,7 @@ export const makeTransitions = (): Transition[] => [
     when: ({ input }) => !input.run && inputMag(input.x, input.z) >= START_INPUT,
     fade: 0.14,
   },
-  // Otherwise the controller will auto-exit to Run (exitTo) with a very smooth handoff
+  // Otherwise the controller waits until the one-shot is DONE, then blends into Run.
 
   // If you resume input during RunStop, go back to locomotion
   {
